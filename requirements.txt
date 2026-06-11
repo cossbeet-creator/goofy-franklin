@@ -1,0 +1,9 @@
+streamlit
+beautifulsoup4
+requests
+google-generativeai
+pandas
+python-dotenv
+lxml
+lightgbm
+scikit-learn

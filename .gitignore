@@ -1,0 +1,22 @@
+# Pythonキャッシュ
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# 巨大なデータファイル（GitHubの100MBファイル制限対策）
+data/
+*.csv
+
+# 環境変数・APIキー（セキュリティ対策）
+.env
+
+# ローカル設定・一時ファイル・ログ
+.system_generated/
+*.log
+scratch/
+.idea/
+.vscode/
+venv/
+.venv/
