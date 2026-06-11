@@ -280,3 +280,142 @@ def calculate_expected_values(df_evaluated, gemini_corrections):
     df['opt_place_ev_threshold'] = opt_place.get('ev_threshold', 1.1)
     
     return df
+
+def calculate_pair_probabilities(df_final):
+    """
+    単勝最終確率(final_win_rate)から、Harville公式を用いて
+    馬連およびワイドの各組み合わせ（ペア）の確率を厳密に算出する。
+    """
+    horses = df_final.copy()
+    horses['umaban'] = horses['umaban'].astype(int)
+    
+    # 馬番と単勝確率の対応辞書
+    win_probs = dict(zip(horses['umaban'], horses['final_win_rate']))
+    umaban_list = sorted(list(win_probs.keys()))
+    
+    # 1. 馬連確率の計算: P(iが1着, jが2着) + P(jが1着, iが2着)
+    umaren_probs = {}
+    for i in range(len(umaban_list)):
+        for j in range(i + 1, len(umaban_list)):
+            u1 = umaban_list[i]
+            u2 = umaban_list[j]
+            p1 = win_probs[u1]
+            p2 = win_probs[u2]
+            
+            p_12 = p1 * (p2 / max(1.0 - p1, 1e-5))
+            p_21 = p2 * (p1 / max(1.0 - p2, 1e-5))
+            umaren_probs[(u1, u2)] = p_12 + p_21
+            
+    # 2. ワイド確率の計算: 3着内に入賞する全組み合わせ(3頭)の確率を総当たり計算 (Harville 3着推定)
+    triplet_probs = {}
+    for a in umaban_list:
+        for b in umaban_list:
+            if a == b: continue
+            for c in umaban_list:
+                if a == c or b == c: continue
+                
+                pa = win_probs[a]
+                pb = win_probs[b]
+                pc = win_probs[c]
+                
+                # P(aが1着, bが2着, cが3着)
+                p_abc = pa * (pb / max(1.0 - pa, 1e-5)) * (pc / max(1.0 - pa - pb, 1e-5))
+                triplet_probs[(a, b, c)] = p_abc
+                
+    # ワイド確率の集計: i, jの両方が 3頭の組合せ (a,b,c) に含まれる確率の総和
+    wide_probs = {}
+    for i in range(len(umaban_list)):
+        for j in range(i + 1, len(umaban_list)):
+            u1 = umaban_list[i]
+            u2 = umaban_list[j]
+            
+            sum_prob = 0.0
+            for a in umaban_list:
+                for b in umaban_list:
+                    if a == b: continue
+                    for c in umaban_list:
+                        if a == c or b == c: continue
+                        
+                        # 3頭の中に u1 と u2 が含まれているかを判定
+                        if (u1 in (a, b, c)) and (u2 in (a, b, c)):
+                            sum_prob += triplet_probs.get((a, b, c), 0.0)
+                            
+            # 重複カウント(順列順の6パターン)が足し合わされているため、組合せ(組み合わせ)単位に集計済み
+            wide_probs[(u1, u2)] = sum_prob
+            
+    return umaren_probs, wide_probs
+
+def calculate_pair_expected_values(df_final, umaren_odds, wide_odds):
+    """
+    馬連・ワイドの確率とオッズを紐付け、期待値(EV)を計算する。
+    """
+    # 各ペアの確率を算出
+    umaren_probs, wide_probs = calculate_pair_probabilities(df_final)
+    
+    umaren_evs = []
+    wide_evs = []
+    
+    # 出走馬のリスト取得
+    horses = df_final.copy()
+    horses['umaban'] = horses['umaban'].astype(int)
+    name_dict = dict(zip(horses['umaban'], horses['horse_name']))
+    pop_dict = dict(zip(horses['umaban'], horses['popularity']))
+    
+    umaban_list = sorted(list(name_dict.keys()))
+    
+    # 1. 馬連期待値の集計
+    for i in range(len(umaban_list)):
+        for j in range(i + 1, len(umaban_list)):
+            u1 = umaban_list[i]
+            u2 = umaban_list[j]
+            
+            prob_ur = umaren_probs.get((u1, u2), 0.0)
+            odds_ur = umaren_odds.get((u1, u2), 0.0)
+            ev_ur = prob_ur * odds_ur
+            
+            pop_sum = pop_dict.get(u1, 10) + pop_dict.get(u2, 10)
+            
+            umaren_evs.append({
+                "umaban_1": u1,
+                "umaban_2": u2,
+                "horse_1": name_dict[u1],
+                "horse_2": name_dict[u2],
+                "probability": prob_ur,
+                "odds": odds_ur,
+                "expected_value": ev_ur,
+                "popularity_sum": pop_sum
+            })
+            
+    # 2. ワイド期待値の集計
+    for i in range(len(umaban_list)):
+        for j in range(i + 1, len(umaban_list)):
+            u1 = umaban_list[i]
+            u2 = umaban_list[j]
+            
+            prob_w = wide_probs.get((u1, u2), 0.0)
+            odds_w_list = wide_odds.get((u1, u2), [0.0, 0.0])
+            odds_w_low = odds_w_list[0]
+            odds_w_high = odds_w_list[1]
+            
+            ev_w_low = prob_w * odds_w_low
+            ev_w_high = prob_w * odds_w_high
+            
+            pop_sum = pop_dict.get(u1, 10) + pop_dict.get(u2, 10)
+            
+            wide_evs.append({
+                "umaban_1": u1,
+                "umaban_2": u2,
+                "horse_1": name_dict[u1],
+                "horse_2": name_dict[u2],
+                "probability": prob_w,
+                "odds_low": odds_w_low,
+                "odds_high": odds_w_high,
+                "expected_value_low": ev_w_low,
+                "expected_value_high": ev_w_high,
+                "popularity_sum": pop_sum
+            })
+            
+    df_umaren = pd.DataFrame(umaren_evs)
+    df_wide = pd.DataFrame(wide_evs)
+    
+    return df_umaren, df_wide

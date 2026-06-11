@@ -7,8 +7,14 @@ import base64
 from dotenv import load_dotenv
 
 # モジュールインポート
-from scraper import get_full_race_data
-from predictor import calculate_base_win_rates, calculate_expected_values, MODEL_PATH, PLACE_MODEL_PATH
+from scraper import get_full_race_data, get_realtime_pair_odds
+from predictor import (
+    calculate_base_win_rates, 
+    calculate_expected_values, 
+    calculate_pair_expected_values,
+    MODEL_PATH, 
+    PLACE_MODEL_PATH
+)
 from gemini_analyzer import analyze_race_with_gemini
 
 # 環境変数のロード
@@ -184,6 +190,14 @@ if "race_data" not in st.session_state:
     st.session_state.race_data = None
 if "df_evaluated" not in st.session_state:
     st.session_state.df_evaluated = None
+if "df_umaren" not in st.session_state:
+    st.session_state.df_umaren = None
+if "df_wide" not in st.session_state:
+    st.session_state.df_wide = None
+if "umaren_odds" not in st.session_state:
+    st.session_state.umaren_odds = None
+if "wide_odds" not in st.session_state:
+    st.session_state.wide_odds = None
 if "gemini_analysis" not in st.session_state:
     st.session_state.gemini_analysis = None
 if "histories" not in st.session_state:
@@ -355,6 +369,16 @@ if start_btn:
                 df_final = calculate_expected_values(df_evaluated, corrections_dict)
                 st.session_state.df_evaluated = df_final
                 
+                # Step 5: 馬連・ワイドのオッズ取得と期待値計算
+                status.update(label="🏇 馬連・ワイドのリアルタイムオッズを取得し期待値を計算中...")
+                umaren_odds, wide_odds = get_realtime_pair_odds(race_id_input, df_final)
+                st.session_state.umaren_odds = umaren_odds
+                st.session_state.wide_odds = wide_odds
+                
+                df_umaren, df_wide = calculate_pair_expected_values(df_final, umaren_odds, wide_odds)
+                st.session_state.df_umaren = df_umaren
+                st.session_state.df_wide = df_wide
+                
                 status.update(label="🎉 分析完了！予想結果を表示します。", state="complete")
 
 # 結果が表示できる状態であれば描画
@@ -388,9 +412,15 @@ if st.session_state.df_evaluated is not None:
     # Tab 1: 期待値予想
     with tab1:
         # 券種選択UI
+        # 券種選択UI
         bet_type = st.radio(
             "対象馬券タイプを選択:",
-            ["複勝（3着以内・手堅く回収率100%超を狙う）", "単勝（1着・ボラティリティ大）"],
+            [
+                "複勝（3着以内・手堅く回収率100%超を狙う）", 
+                "単勝（1着・ボラティリティ大）",
+                "馬連（1着2着の組み合わせ）",
+                "ワイド（2頭ともに3着以内に入賞）"
+            ],
             horizontal=True
         )
         
@@ -450,7 +480,7 @@ if st.session_state.df_evaluated is not None:
             else:
                 st.warning("⚠️ バックテストの最適基準を満たす複勝推奨馬がいません。このレースの購入は見送りを推奨します。")
                 
-        else:
+        elif "単勝" in bet_type:
             st.subheader("🎯 単勝（1着）期待値ランキング")
             
             # パラメータ取得
@@ -504,6 +534,111 @@ if st.session_state.df_evaluated is not None:
                 st.info("💡 **推奨根拠:** 本馬はバックテスト（2020年以降の未知テストデータ）において、単勝回収率最大（シミュレーション期待値133.27%）を叩き出した「人気制限内期待値最大1頭厳選戦略」に合致する妙味馬です。")
             else:
                 st.warning("⚠️ 最適化基準を満たす単勝推奨馬がいません。このレースの購入は見送りを推奨します。")
+
+        elif "馬連" in bet_type:
+            st.subheader("🎯 馬連 期待値ランキング")
+            
+            df_umaren_res = st.session_state.df_umaren.copy() if st.session_state.df_umaren is not None else pd.DataFrame()
+            
+            if df_umaren_res.empty:
+                st.warning("馬連データがありません。予測を再度実行してください。")
+            else:
+                # 期待値の降順でソート
+                df_umaren_res = df_umaren_res.sort_values(by='expected_value', ascending=False).copy()
+                
+                # 厳選推奨ペアの判定：期待値が 1.05 以上かつ人気合計が 12 以下
+                # 該当するペアのうち、期待値が最大のものを厳選推奨とする
+                df_filtered = df_umaren_res[(df_umaren_res['expected_value'] >= 1.05) & (df_umaren_res['popularity_sum'] <= 12)]
+                best_pair = None
+                if not df_filtered.empty:
+                    best_pair = df_filtered.iloc[0] # ソートされているので先頭が期待値最大
+                
+                # 表示用にフォーマット
+                df_umaren_res['確率'] = (df_umaren_res['probability'] * 100).round(2).astype(str) + "%"
+                df_umaren_res['オッズ'] = df_umaren_res['odds'].astype(str) + "倍"
+                df_umaren_res['期待値'] = df_umaren_res['expected_value'].round(3)
+                
+                cols_to_show = [
+                    'umaban_1', 'horse_1', 'umaban_2', 'horse_2', 'オッズ', 'popularity_sum', '確率', '期待値'
+                ]
+                df_display = df_umaren_res[cols_to_show].rename(columns={
+                    'umaban_1': '馬番1', 'horse_1': '馬名1',
+                    'umaban_2': '馬番2', 'horse_2': '馬名2',
+                    'popularity_sum': '人気合計'
+                })
+                
+                # ハイライト表示
+                def highlight_umaren(row):
+                    if best_pair is not None:
+                        is_best = (row['馬番1'] == best_pair['馬番1'] and row['馬番2'] == best_pair['馬番2'])
+                    else:
+                        is_best = False
+                    return ['background-color: rgba(0, 255, 127, 0.25); font-weight: bold;' if is_best else '' for _ in row]
+                
+                st.dataframe(
+                    df_display.style.apply(highlight_umaren, axis=1),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("### 🎫 馬連推奨ペア (戦略: 期待値1.05以上 & 人気合計12以下の期待値最大ペア)")
+                if best_pair is not None:
+                    st.success(f"🏆 **馬連厳選推奨:** {best_pair['umaban_1']}-{best_pair['umaban_2']} ({best_pair['horse_1']} - {best_pair['horse_2']}) "
+                               f"(人気合計: {best_pair['popularity_sum']} | 推定確率: {best_pair['probability']*100:.1f}% | オッズ: {best_pair['odds']:.1f}倍 | 期待値: {best_pair['expected_value']:.2f})")
+                else:
+                    st.warning("⚠️ 最適化基準を満たす馬連推奨ペアがありません。このレースでの馬連購入は見送りを推奨します。")
+
+        elif "ワイド" in bet_type:
+            st.subheader("🎯 ワイド 期待値ランキング")
+            
+            df_wide_res = st.session_state.df_wide.copy() if st.session_state.df_wide is not None else pd.DataFrame()
+            
+            if df_wide_res.empty:
+                st.warning("ワイドデータがありません。予測を再度実行してください。")
+            else:
+                # 下限期待値(expected_value_low)の降順でソートします。
+                df_wide_res = df_wide_res.sort_values(by='expected_value_low', ascending=False).copy()
+                
+                # 厳選推奨ペアの判定：下限期待値が 1.0 以上かつ人気合計が 12 以下
+                # 該当するペアのうち、下限期待値が最大のものを厳選推奨とする
+                df_filtered = df_wide_res[(df_wide_res['expected_value_low'] >= 1.0) & (df_wide_res['popularity_sum'] <= 12)]
+                best_pair = None
+                if not df_filtered.empty:
+                    best_pair = df_filtered.iloc[0]
+                
+                # 表示用にフォーマット
+                df_wide_res['確率'] = (df_wide_res['probability'] * 100).round(2).astype(str) + "%"
+                df_wide_res['想定オッズ範囲'] = df_wide_res['odds_low'].astype(str) + " - " + df_wide_res['odds_high'].astype(str) + "倍"
+                df_wide_res['期待値範囲'] = df_wide_res['expected_value_low'].round(2).astype(str) + " - " + df_wide_res['expected_value_high'].round(2).astype(str)
+                
+                cols_to_show = [
+                    'umaban_1', 'horse_1', 'umaban_2', 'horse_2', '想定オッズ範囲', 'popularity_sum', '確率', '期待値範囲'
+                ]
+                df_display = df_wide_res[cols_to_show].rename(columns={
+                    'umaban_1': '馬番1', 'horse_1': '馬名1',
+                    'umaban_2': '馬番2', 'horse_2': '馬名2',
+                    'popularity_sum': '人気合計'
+                })
+                
+                def highlight_wide(row):
+                    if best_pair is not None:
+                        is_best = (row['馬番1'] == best_pair['馬番1'] and row['馬番2'] == best_pair['馬番2'])
+                    else:
+                        is_best = False
+                    return ['background-color: rgba(0, 255, 127, 0.25); font-weight: bold;' if is_best else '' for _ in row]
+                
+                st.dataframe(
+                    df_display.style.apply(highlight_wide, axis=1),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("### 🎫 ワイド推奨ペア (戦略: 下限期待値1.0以上 & 人気合計12以下の期待値最大ペア)")
+                if best_pair is not None:
+                    st.success(f"🏆 **ワイド厳選推奨:** {best_pair['umaban_1']}-{best_pair['umaban_2']} ({best_pair['horse_1']} - {best_pair['horse_2']}) "
+                               f"(人気合計: {best_pair['popularity_sum']} | 推定確率: {best_pair['probability']*100:.1f}% | オッズ: {best_pair['odds_low']:.1f}-{best_pair['odds_high']:.1f}倍 | 期待値: {best_pair['expected_value_low']:.2f}-{best_pair['expected_value_high']:.2f})")
+                else:
+                    st.warning("⚠️ 最適化基準を満たすワイド推奨ペアがありません。このレースでのワイド購入は見送りを推奨します。")
 
     # Tab 2: Gemini AI レース分析・解説
     with tab2:
@@ -565,6 +700,17 @@ if st.session_state.df_evaluated is not None:
             manual_corrections = {row['馬番']: float(row['手動補正']) for idx, row in edited_df.iterrows()}
             df_recalculated = calculate_expected_values(df_recalc, manual_corrections)
             st.session_state.df_evaluated = df_recalculated
+            
+            # 馬連・ワイドの期待値も再計算
+            if st.session_state.umaren_odds is not None and st.session_state.wide_odds is not None:
+                df_umaren, df_wide = calculate_pair_expected_values(
+                    df_recalculated, 
+                    st.session_state.umaren_odds, 
+                    st.session_state.wide_odds
+                )
+                st.session_state.df_umaren = df_umaren
+                st.session_state.df_wide = df_wide
+                
             st.success("手動補正した期待値を再計算しました！「AI期待値予想」タブを確認してください。")
             st.rerun()
 

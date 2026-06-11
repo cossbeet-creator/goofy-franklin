@@ -369,3 +369,148 @@ def get_full_race_data(race_id, use_mock=False):
             histories[h_id] = get_mock_history(h_id)
             
     return race_info, df_horses, histories
+
+def generate_mock_pair_odds(df_horses):
+    """
+    ローカル開発用：出走馬の単勝オッズから擬似的な馬連・ワイドのオッズを自動生成するフォールバック処理
+    """
+    logger.info("Generating mock Quinella/Wide pair odds...")
+    umaren_odds = {}
+    wide_odds = {}
+    
+    if df_horses is None or len(df_horses) == 0:
+        return umaren_odds, wide_odds
+        
+    horses = df_horses.copy()
+    horses['odds'] = pd.to_numeric(horses['odds'], errors='coerce').fillna(99.0)
+    horses['umaban'] = pd.to_numeric(horses['umaban'], errors='coerce').fillna(0).astype(int)
+    
+    umaban_list = sorted(horses['umaban'].tolist())
+    odds_dict = dict(zip(horses['umaban'], horses['odds']))
+    
+    for i in range(len(umaban_list)):
+        for j in range(i + 1, len(umaban_list)):
+            u1 = umaban_list[i]
+            u2 = umaban_list[j]
+            if u1 == 0 or u2 == 0:
+                continue
+                
+            odds_product = odds_dict[u1] * odds_dict[u2]
+            
+            # 馬連擬似オッズ: 単勝の積に 0.15~0.25 の乱数を掛ける
+            val_ur = odds_product * random.uniform(0.15, 0.25)
+            val_ur = max(round(val_ur, 1), 1.1)
+            umaren_odds[(u1, u2)] = val_ur
+            
+            # ワイド擬似オッズ: 単勝の積に 0.05~0.12 の乱数（下限）
+            val_w_low = odds_product * random.uniform(0.05, 0.10)
+            val_w_low = max(round(val_w_low, 1), 1.1)
+            val_w_high = val_w_low * random.uniform(1.3, 1.8)
+            val_w_high = max(round(val_w_high, 1), val_w_low + 0.1)
+            wide_odds[(u1, u2)] = [val_w_low, val_w_high]
+            
+    return umaren_odds, wide_odds
+
+def get_realtime_pair_odds(race_id, df_horses):
+    """
+    Yahoo!競馬からリアルタイムの馬連・ワイドオッズを取得する。
+    DNS名前解決エラーやネットワークエラーが発生した場合は自動的にモックデータ生成にフォールバックする。
+    """
+    # netkeibaIDの先頭2桁(20)を削りYahooコードに変換
+    yahoo_code = str(race_id)[2:]
+    
+    umaren_odds = {}
+    wide_odds = {}
+    
+    # --- 1. 馬連オッズの取得 ---
+    ur_url = f"https://keiba.yahoo.co.jp/odds/ur/{yahoo_code}/"
+    try:
+        logger.info(f"Attempting to fetch Yahoo Quinella odds from {ur_url}")
+        r = requests.get(ur_url, headers=HEADERS, timeout=6)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.content, "html.parser")
+            # Yahoo馬連テーブル (通常クラス 'oddsUrTbl' または table タグ)
+            tables = soup.find_all("table")
+            for t in tables:
+                rows = t.find_all("tr")
+                for row in rows:
+                    tds = row.find_all(["td", "th"])
+                    if len(tds) < 2:
+                        continue
+                    # 軸馬番の特定
+                    axis_text = tds[0].get_text(strip=True)
+                    if not axis_text.isdigit():
+                        continue
+                    axis_num = int(axis_text)
+                    
+                    # 相手馬番とオッズの抽出
+                    # Yahooのレイアウトでは、軸のセルの右に相手馬番とオッズが入ったサブテーブルやtdが並ぶ
+                    for td in tds[1:]:
+                        # サブテーブルなどの内包するテキストを検索
+                        # 通常は "2 15.4" のように馬番とオッズが入る
+                        sub_text = td.get_text(strip=True)
+                        # 正規表現で「馬番」と「オッズ」のペアを全抽出
+                        matches = re.findall(r'(\d+)\s+([\d\.-]+)', sub_text)
+                        for opp_str, odds_str in matches:
+                            opp_num = int(opp_str)
+                            if odds_str == "-" or odds_str == "---" or odds_str == ".":
+                                continue
+                            try:
+                                val = float(odds_str)
+                                pair = (min(axis_num, opp_num), max(axis_num, opp_num))
+                                umaren_odds[pair] = val
+                            except ValueError:
+                                pass
+            logger.info(f"Successfully parsed {len(umaren_odds)} Quinella odds from Yahoo.")
+        else:
+            logger.warning(f"Yahoo Quinella page returned status: {r.status_code}")
+    except Exception as e:
+        logger.warning(f"Failed to fetch/parse Yahoo Quinella odds ({e}). Using mock fallback.")
+        
+    # --- 2. ワイドオッズの取得 ---
+    wide_url = f"https://keiba.yahoo.co.jp/odds/wide/{yahoo_code}/"
+    try:
+        logger.info(f"Attempting to fetch Yahoo Wide odds from {wide_url}")
+        r = requests.get(wide_url, headers=HEADERS, timeout=6)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.content, "html.parser")
+            tables = soup.find_all("table")
+            for t in tables:
+                rows = t.find_all("tr")
+                for row in rows:
+                    tds = row.find_all(["td", "th"])
+                    if len(tds) < 2:
+                        continue
+                    axis_text = tds[0].get_text(strip=True)
+                    if not axis_text.isdigit():
+                        continue
+                    axis_num = int(axis_text)
+                    
+                    for td in tds[1:]:
+                        sub_text = td.get_text(strip=True)
+                        # ワイドはオッズが「2.5-3.8」のようにハイフンで繋がれている
+                        matches = re.findall(r'(\d+)\s+([\d\.]+)-([\d\.]+)', sub_text)
+                        for opp_str, low_str, high_str in matches:
+                            opp_num = int(opp_str)
+                            try:
+                                val_low = float(low_str)
+                                val_high = float(high_str)
+                                pair = (min(axis_num, opp_num), max(axis_num, opp_num))
+                                wide_odds[pair] = [val_low, val_high]
+                            except ValueError:
+                                pass
+            logger.info(f"Successfully parsed {len(wide_odds)} Wide odds from Yahoo.")
+        else:
+            logger.warning(f"Yahoo Wide page returned status: {r.status_code}")
+    except Exception as e:
+        logger.warning(f"Failed to fetch/parse Yahoo Wide odds ({e}). Using mock fallback.")
+        
+    # いずれかのオッズ取得が空だった場合、またはエラーだった場合はモックで補完
+    if not umaren_odds or not wide_odds:
+        mock_ur, mock_w = generate_mock_pair_odds(df_horses)
+        if not umaren_odds:
+            umaren_odds = mock_ur
+        if not wide_odds:
+            wide_odds = mock_w
+            
+    return umaren_odds, wide_odds
