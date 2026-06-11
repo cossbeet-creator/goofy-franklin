@@ -12,6 +12,7 @@ from predictor import (
     calculate_base_win_rates, 
     calculate_expected_values, 
     calculate_pair_expected_values,
+    load_trained_model,
     MODEL_PATH, 
     PLACE_MODEL_PATH
 )
@@ -543,12 +544,19 @@ if st.session_state.df_evaluated is not None:
             if df_umaren_res.empty:
                 st.warning("馬連データがありません。予測を再度実行してください。")
             else:
+                # モデルから最適パラメータをロード (馬連)
+                win_model_data = load_trained_model(MODEL_PATH)
+                opt_umaren = win_model_data.get('optimal_params_umaren', {}) if win_model_data else {}
+                opt_pop_limit = int(opt_umaren.get('pop_limit', 10))
+                opt_ev_threshold = float(opt_umaren.get('ev_threshold', 0.95))
+                
+                st.write(f"馬連モデルとYahoo!競馬オッズに基づくランキングです。(バックテスト最適設定: 人気合計制限={opt_pop_limit}以下, 期待値閾値={opt_ev_threshold})")
+                
                 # 期待値の降順でソート
                 df_umaren_res = df_umaren_res.sort_values(by='expected_value', ascending=False).copy()
                 
-                # 厳選推奨ペアの判定：期待値が 1.05 以上かつ人気合計が 12 以下
-                # 該当するペアのうち、期待値が最大のものを厳選推奨とする
-                df_filtered = df_umaren_res[(df_umaren_res['expected_value'] >= 1.05) & (df_umaren_res['popularity_sum'] <= 12)]
+                # 厳選推奨ペアの判定
+                df_filtered = df_umaren_res[(df_umaren_res['expected_value'] >= opt_ev_threshold) & (df_umaren_res['popularity_sum'] <= opt_pop_limit)]
                 best_pair = None
                 if not df_filtered.empty:
                     best_pair = df_filtered.iloc[0] # ソートされているので先頭が期待値最大
@@ -570,7 +578,7 @@ if st.session_state.df_evaluated is not None:
                 # ハイライト表示
                 def highlight_umaren(row):
                     if best_pair is not None:
-                        is_best = (row['馬番1'] == best_pair['馬番1'] and row['馬番2'] == best_pair['馬番2'])
+                        is_best = (row['馬番1'] == best_pair['umaban_1'] and row['馬番2'] == best_pair['umaban_2'])
                     else:
                         is_best = False
                     return ['background-color: rgba(0, 255, 127, 0.25); font-weight: bold;' if is_best else '' for _ in row]
@@ -581,7 +589,7 @@ if st.session_state.df_evaluated is not None:
                     hide_index=True
                 )
                 
-                st.markdown("### 🎫 馬連推奨ペア (戦略: 期待値1.05以上 & 人気合計12以下の期待値最大ペア)")
+                st.markdown(f"### 🎫 馬連推奨ペア (戦略: 期待値{opt_ev_threshold}以上 & 人気合計{opt_pop_limit}以下の期待値最大ペア)")
                 if best_pair is not None:
                     st.success(f"🏆 **馬連厳選推奨:** {best_pair['umaban_1']}-{best_pair['umaban_2']} ({best_pair['horse_1']} - {best_pair['horse_2']}) "
                                f"(人気合計: {best_pair['popularity_sum']} | 推定確率: {best_pair['probability']*100:.1f}% | オッズ: {best_pair['odds']:.1f}倍 | 期待値: {best_pair['expected_value']:.2f})")
@@ -596,12 +604,19 @@ if st.session_state.df_evaluated is not None:
             if df_wide_res.empty:
                 st.warning("ワイドデータがありません。予測を再度実行してください。")
             else:
+                # モデルから最適パラメータをロード (ワイド)
+                place_model_data = load_trained_model(PLACE_MODEL_PATH)
+                opt_wide = place_model_data.get('optimal_params_wide', {}) if place_model_data else {}
+                opt_pop_limit = int(opt_wide.get('pop_limit', 8))
+                opt_ev_threshold = float(opt_wide.get('ev_threshold', 0.95))
+                
+                st.write(f"ワイドモデルとYahoo!競馬オッズに基づくランキングです。(バックテスト最適設定: 人気合計制限={opt_pop_limit}以下, 期待値閾値={opt_ev_threshold})")
+                
                 # 下限期待値(expected_value_low)の降順でソートします。
                 df_wide_res = df_wide_res.sort_values(by='expected_value_low', ascending=False).copy()
                 
-                # 厳選推奨ペアの判定：下限期待値が 1.0 以上かつ人気合計が 12 以下
-                # 該当するペアのうち、下限期待値が最大のものを厳選推奨とする
-                df_filtered = df_wide_res[(df_wide_res['expected_value_low'] >= 1.0) & (df_wide_res['popularity_sum'] <= 12)]
+                # 厳選推奨ペアの判定：下限期待値が opt_ev_threshold 以上かつ人気合計が opt_pop_limit 以下
+                df_filtered = df_wide_res[(df_wide_res['expected_value_low'] >= opt_ev_threshold) & (df_wide_res['popularity_sum'] <= opt_pop_limit)]
                 best_pair = None
                 if not df_filtered.empty:
                     best_pair = df_filtered.iloc[0]
@@ -622,7 +637,7 @@ if st.session_state.df_evaluated is not None:
                 
                 def highlight_wide(row):
                     if best_pair is not None:
-                        is_best = (row['馬番1'] == best_pair['馬番1'] and row['馬番2'] == best_pair['馬番2'])
+                        is_best = (row['馬番1'] == best_pair['umaban_1'] and row['馬番2'] == best_pair['umaban_2'])
                     else:
                         is_best = False
                     return ['background-color: rgba(0, 255, 127, 0.25); font-weight: bold;' if is_best else '' for _ in row]
@@ -633,7 +648,7 @@ if st.session_state.df_evaluated is not None:
                     hide_index=True
                 )
                 
-                st.markdown("### 🎫 ワイド推奨ペア (戦略: 下限期待値1.0以上 & 人気合計12以下の期待値最大ペア)")
+                st.markdown(f"### 🎫 ワイド推奨ペア (戦略: 下限期待値{opt_ev_threshold}以上 & 人気合計{opt_pop_limit}以下の期待値最大ペア)")
                 if best_pair is not None:
                     st.success(f"🏆 **ワイド厳選推奨:** {best_pair['umaban_1']}-{best_pair['umaban_2']} ({best_pair['horse_1']} - {best_pair['horse_2']}) "
                                f"(人気合計: {best_pair['popularity_sum']} | 推定確率: {best_pair['probability']*100:.1f}% | オッズ: {best_pair['odds_low']:.1f}-{best_pair['odds_high']:.1f}倍 | 期待値: {best_pair['expected_value_low']:.2f}-{best_pair['expected_value_high']:.2f})")

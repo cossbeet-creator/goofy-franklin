@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import logging
 import sys
+from collections import defaultdict
 
 try:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -84,7 +85,16 @@ def run_backtest():
     use_cols_odds = [
         'レースID', 
         '単勝1_オッズ', '複勝1_馬番', '複勝2_馬番', '複勝3_馬番', '複勝4_馬番', '複勝5_馬番',
-        '複勝1_オッズ', '複勝2_オッズ', '複勝3_オッズ', '複勝4_オッズ', '複勝5_オッズ'
+        '複勝1_オッズ', '複勝2_オッズ', '複勝3_オッズ', '複勝4_オッズ', '複勝5_オッズ',
+        '馬連1_組合せ1', '馬連1_組合せ2', '馬連1_オッズ',
+        '馬連2_組合せ1', '馬連2_組合せ2', '馬連2_オッズ',
+        'ワイド1_組合せ1', 'ワイド1_組合せ2', 'ワイド1_オッズ',
+        'ワイド2_組合せ1', 'ワイド2_組合せ2', 'ワイド2_オッズ',
+        'ワイド3_組合せ1', 'ワイド3_組合せ2', 'ワイド3_オッズ',
+        'ワイド4_組合せ1', 'ワイド4_組合せ2', 'ワイド4_オッズ',
+        'ワイド5_組合せ1', 'ワイド5_組合せ2', 'ワイド5_オッズ',
+        'ワイド6_組合せ1', 'ワイド6_組合せ2', 'ワイド6_オッズ',
+        'ワイド7_組合せ1', 'ワイド7_組合せ2', 'ワイド7_オッズ'
     ]
     df_odds = pd.read_csv(ODDS_PATH, encoding='utf-8-sig', usecols=use_cols_odds)
     df = pd.merge(df, df_odds, on='レースID', how='left')
@@ -187,7 +197,6 @@ def run_backtest():
                         "roi_win": roi_win
                     })
                     
-                    # 複勝回収率ベースでのベスト
                     if roi_place > best_roi_place_strat:
                         best_roi_place_strat = roi_place
                         best_params_place_strat = {
@@ -200,7 +209,7 @@ def run_backtest():
                             "roi_win_ref": f"{roi_win:.2f}%"
                         }
                         
-    # --- 戦略2: 単勝期待値ベースで単勝を買う (新規追加) ---
+    # --- 戦略2: 単勝期待値ベースで単勝を買う ---
     best_roi_win_strat = 0.0
     best_params_win_strat = {}
     win_strat_results = []
@@ -254,6 +263,232 @@ def run_backtest():
                                 "roi_win": f"{roi_win:.2f}%"
                             }
                             
+    # --- 戦略3: 馬連・ワイドのグリッドサーチ ---
+    logger.info("Running Quinella & Wide backtest preparation...")
+    # 単勝の最適 alpha = 0.15 を使用
+    alpha_win_opt = 0.15
+    df['blended_win_prob_opt'] = alpha_win_opt * df['win_prob'] + (1 - alpha_win_opt) * df['odds_support_rate_win']
+    df['blended_win_sum_opt'] = df.groupby('レースID')['blended_win_prob_opt'].transform('sum')
+    df['final_win_prob_opt'] = df['blended_win_prob_opt'] / df['blended_win_sum_opt']
+    
+    # 配当辞書の構築
+    logger.info("Building Quinella & Wide payout lookup dictionaries...")
+    umaren_payouts_dict = {}
+    wide_payouts_dict = {}
+    
+    df_unique_odds = df[['レースID', 
+                         '馬連1_組合せ1', '馬連1_組合せ2', '馬連1_オッズ',
+                         '馬連2_組合せ1', '馬連2_組合せ2', '馬連2_オッズ',
+                         'ワイド1_組合せ1', 'ワイド1_組合せ2', 'ワイド1_オッズ',
+                         'ワイド2_組合せ1', 'ワイド2_組合せ2', 'ワイド2_オッズ',
+                         'ワイド3_組合せ1', 'ワイド3_組合せ2', 'ワイド3_オッズ',
+                         'ワイド4_組合せ1', 'ワイド4_組合せ2', 'ワイド4_オッズ',
+                         'ワイド5_組合せ1', 'ワイド5_組合せ2', 'ワイド5_オッズ',
+                         'ワイド6_組合せ1', 'ワイド6_組合せ2', 'ワイド6_オッズ',
+                         'ワイド7_組合せ1', 'ワイド7_組合せ2', 'ワイド7_オッズ']].drop_duplicates(subset=['レースID'])
+                         
+    for idx, row in df_unique_odds.iterrows():
+        r_id = row['レースID']
+        # 馬連 1, 2
+        for m in range(1, 3):
+            u1, u2 = row[f'馬連{m}_組合せ1'], row[f'馬連{m}_組合せ2']
+            odds_val = row[f'馬連{m}_オッズ']
+            if not pd.isna(u1) and not pd.isna(u2) and not pd.isna(odds_val):
+                p1, p2 = int(u1), int(u2)
+                pair = (min(p1, p2), max(p1, p2))
+                umaren_payouts_dict[(r_id, pair)] = float(odds_val) / 100.0
+                
+        # ワイド 1〜7
+        for k in range(1, 8):
+            u1, u2 = row[f'ワイド{k}_組合せ1'], row[f'ワイド{k}_組合せ2']
+            odds_val = row[f'ワイド{k}_オッズ']
+            if not pd.isna(u1) and not pd.isna(u2) and not pd.isna(odds_val):
+                p1, p2 = int(u1), int(u2)
+                pair = (min(p1, p2), max(p1, p2))
+                wide_payouts_dict[(r_id, pair)] = float(odds_val) / 100.0
+
+    # ペア確率の計算
+    logger.info("Calculating Quinella & Wide probabilities for all test races...")
+    umaren_records = []
+    wide_records = []
+    
+    grouped = df.groupby('レースID')
+    
+    for race_id, group in grouped:
+        umaban_list = group['umaban'].tolist()
+        win_probs = group['final_win_prob_opt'].tolist()
+        odds_list = group['odds'].tolist()
+        pop_list = group['popularity'].tolist()
+        
+        n = len(umaban_list)
+        if n < 4:
+            continue
+            
+        prob_dict = dict(zip(umaban_list, win_probs))
+        odds_dict = dict(zip(umaban_list, odds_list))
+        pop_dict = dict(zip(umaban_list, pop_list))
+        
+        # 1. 馬連確率
+        umaren_probs = {}
+        for i in range(n):
+            for j in range(i + 1, n):
+                u1, u2 = umaban_list[i], umaban_list[j]
+                p1, p2 = win_probs[i], win_probs[j]
+                p_12 = p1 * (p2 / max(1.0 - p1, 1e-5))
+                p_21 = p2 * (p1 / max(1.0 - p2, 1e-5))
+                umaren_probs[(u1, u2)] = p_12 + p_21
+                
+        # 2. ワイド確率 (Harville 3着推定の最適化)
+        triplet_probs = {}
+        for a in umaban_list:
+            pa = prob_dict[a]
+            if pa < 1e-5: continue
+            for b in umaban_list:
+                if a == b: continue
+                pb = prob_dict[b]
+                if pb < 1e-5: continue
+                p_ab = pa * (pb / max(1.0 - pa, 1e-5))
+                for c in umaban_list:
+                    if a == c or b == c: continue
+                    pc = prob_dict[c]
+                    if pc < 1e-5: continue
+                    p_abc = p_ab * (pc / max(1.0 - pa - pb, 1e-5))
+                    triplet_probs[(a, b, c)] = p_abc
+                    
+        # 各ペアのワイド確率を足し込む (重複を許容した3重ループの最適化)
+        wide_probs = defaultdict(float)
+        for (a, b, c), p_abc in triplet_probs.items():
+            wide_probs[(min(a, b), max(a, b))] += p_abc
+            wide_probs[(min(b, c), max(b, c))] += p_abc
+            wide_probs[(min(a, c), max(a, c))] += p_abc
+            
+        for i in range(n):
+            for j in range(i + 1, n):
+                u1, u2 = umaban_list[i], umaban_list[j]
+                sum_w_prob = wide_probs.get((u1, u2), 0.0)
+                                
+                # 決定論的想定オッズ
+                est_odds_umaren = max(odds_dict[u1] * odds_dict[u2] * 0.20, 1.1)
+                est_odds_wide = max(odds_dict[u1] * odds_dict[u2] * 0.08, 1.1)
+                
+                payout_umaren = umaren_payouts_dict.get((race_id, (min(u1, u2), max(u1, u2))), 0.0)
+                payout_wide = wide_payouts_dict.get((race_id, (min(u1, u2), max(u1, u2))), 0.0)
+                
+                pop_sum = pop_dict[u1] + pop_dict[u2]
+                
+                umaren_records.append({
+                    'レースID': race_id,
+                    'umaban_1': u1,
+                    'umaban_2': u2,
+                    'probability': umaren_probs[(u1, u2)],
+                    'estimated_odds': est_odds_umaren,
+                    'expected_value': umaren_probs[(u1, u2)] * est_odds_umaren,
+                    'popularity_sum': pop_sum,
+                    'payout': payout_umaren
+                })
+                
+                wide_records.append({
+                    'レースID': race_id,
+                    'umaban_1': u1,
+                    'umaban_2': u2,
+                    'probability': sum_w_prob,
+                    'estimated_odds': est_odds_wide,
+                    'expected_value': sum_w_prob * est_odds_wide,
+                    'popularity_sum': pop_sum,
+                    'payout': payout_wide
+                })
+                
+    df_umaren_all = pd.DataFrame(umaren_records)
+    df_wide_all = pd.DataFrame(wide_records)
+    
+    # パラメータ設定 (馬連・ワイド)
+    pop_sum_limits = [8, 10, 12, 14, 16, 99]
+    ev_thresholds_pair = [0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20]
+    
+    # --- 馬連グリッドサーチ ---
+    best_roi_umaren = 0.0
+    best_params_umaren = {}
+    umaren_results = []
+    
+    logger.info("Running Quinella-EV select-top-1 strategy grid search...")
+    for pop_limit in pop_sum_limits:
+        pop_cond = (df_umaren_all['popularity_sum'] <= pop_limit) if pop_limit != 99 else pd.Series([True]*len(df_umaren_all))
+        df_filtered = df_umaren_all[pop_cond].copy()
+        if len(df_filtered) == 0:
+            continue
+            
+        max_evs = df_filtered.groupby('レースID')['expected_value'].transform('max')
+        df_filtered['is_max_ev_in_race'] = (df_filtered['expected_value'] == max_evs)
+        
+        for ev_th in ev_thresholds_pair:
+            purchased = df_filtered[df_filtered['is_max_ev_in_race'] & (df_filtered['expected_value'] >= ev_th)]
+            total_bets = len(purchased)
+            
+            if total_bets >= 50:
+                total_returns = purchased['payout'].sum()
+                roi = (total_returns / total_bets) * 100
+                hit_rate = (len(purchased[purchased['payout'] > 0]) / total_bets) * 100
+                
+                umaren_results.append({
+                    "pop_limit": pop_limit if pop_limit != 99 else "NoLimit",
+                    "ev_threshold": ev_th,
+                    "total_bets": total_bets,
+                    "hit_rate": hit_rate,
+                    "roi": roi
+                })
+                
+                if roi > best_roi_umaren:
+                    best_roi_umaren = roi
+                    best_params_umaren = {
+                        "pop_limit": pop_limit if pop_limit != 99 else "NoLimit",
+                        "ev_threshold": ev_th,
+                        "total_bets": total_bets,
+                        "hit_rate": f"{hit_rate:.1f}%",
+                        "roi": f"{roi:.2f}%"
+                    }
+                    
+    # --- ワイドグリッドサーチ ---
+    best_roi_wide = 0.0
+    best_params_wide = {}
+    wide_results = []
+    
+    logger.info("Running Wide-EV select-top-1 strategy grid search...")
+    for pop_limit in pop_sum_limits:
+        pop_cond = (df_wide_all['popularity_sum'] <= pop_limit) if pop_limit != 99 else pd.Series([True]*len(df_wide_all))
+        df_filtered = df_wide_all[pop_cond].copy()
+        if len(df_filtered) == 0:
+            continue
+            
+        max_evs = df_filtered.groupby('レースID')['expected_value'].transform('max')
+        df_filtered['is_max_ev_in_race'] = (df_filtered['expected_value'] == max_evs)
+        
+        for ev_th in ev_thresholds_pair:
+            purchased = df_filtered[df_filtered['is_max_ev_in_race'] & (df_filtered['expected_value'] >= ev_th)]
+            total_bets = len(purchased)
+            
+            if total_bets >= 50:
+                total_returns = purchased['payout'].sum()
+                roi = (total_returns / total_bets) * 100
+                hit_rate = (len(purchased[purchased['payout'] > 0]) / total_bets) * 100
+                
+                wide_results.append({
+                    "pop_limit": pop_limit if pop_limit != 99 else "NoLimit",
+                    "ev_threshold": ev_th,
+                    "total_bets": total_bets,
+                    "hit_rate": hit_rate,
+                    "roi": roi
+                })
+                
+                if roi > best_roi_wide:
+                    best_roi_wide = roi
+                    best_params_wide = {
+                        "pop_limit": pop_limit if pop_limit != 99 else "NoLimit",
+                        "ev_threshold": ev_th,
+                        "total_bets": total_bets,
+                        "hit_rate": f"{hit_rate:.1f}%",
+                        "roi": f"{roi:.2f}%"
+                    }
+
     # 結果表示
     if place_strat_results:
         df_p_results = pd.DataFrame(place_strat_results).sort_values(by="roi_place", ascending=False)
@@ -265,6 +500,16 @@ def run_backtest():
         print("\n=== TOP 5 CONFIGURATIONS (WIN-EV STRATEGY) ===")
         print(df_w_results[["alpha", "pop_limit", "ev_threshold", "total_bets", "hit_rate_win", "roi_win"]].head(5).to_string(index=False))
         
+    if umaren_results:
+        df_u_results = pd.DataFrame(umaren_results).sort_values(by="roi", ascending=False)
+        print("\n=== TOP 5 CONFIGURATIONS (QUINELLA-EV STRATEGY) ===")
+        print(df_u_results[["pop_limit", "ev_threshold", "total_bets", "hit_rate", "roi"]].head(5).to_string(index=False))
+
+    if wide_results:
+        df_wi_results = pd.DataFrame(wide_results).sort_values(by="roi", ascending=False)
+        print("\n=== TOP 5 CONFIGURATIONS (WIDE-EV STRATEGY) ===")
+        print(df_wi_results[["pop_limit", "ev_threshold", "total_bets", "hit_rate", "roi"]].head(5).to_string(index=False))
+
     print("\n[BEST PLACE-EV CONFIGURATION FOUND]")
     if best_params_place_strat:
         for k, v in best_params_place_strat.items():
@@ -275,10 +520,19 @@ def run_backtest():
         for k, v in best_params_win_strat.items():
             print(f" - {k}: {v}")
             
-    # 最良パラメータの保存（アプリや予測器が利用できるよう、モデルデータにメタデータとして追加保存する）
-    # ここでは、全体で最も回収率が高い設定をモデルファイルに optimal_params として追加する
+    print("\n[BEST QUINELLA-EV CONFIGURATION FOUND]")
+    if best_params_umaren:
+        for k, v in best_params_umaren.items():
+            print(f" - {k}: {v}")
+
+    print("\n[BEST WIDE-EV CONFIGURATION FOUND]")
+    if best_params_wide:
+        for k, v in best_params_wide.items():
+            print(f" - {k}: {v}")
+
+    # 最良パラメータの保存
     try:
-        # 複勝モデルに複勝戦略パラメータを保存
+        # 複勝モデルに複勝・ワイド戦略パラメータを保存
         if best_params_place_strat:
             model_data['optimal_params'] = {
                 'alpha': best_params_place_strat['alpha'],
@@ -286,11 +540,16 @@ def run_backtest():
                 'ev_threshold': float(best_params_place_strat['ev_threshold']),
                 'strategy': 'place_ev'
             }
+            if best_params_wide:
+                model_data['optimal_params_wide'] = {
+                    'pop_limit': 99 if best_params_wide['pop_limit'] == "NoLimit" else int(best_params_wide['pop_limit']),
+                    'ev_threshold': float(best_params_wide['ev_threshold'])
+                }
             with open(PLACE_MODEL_PATH, 'wb') as f:
                 pickle.dump(model_data, f)
-            logger.info("Saved optimal place strategy parameters to Place model.")
+            logger.info("Saved optimal place & wide strategy parameters to Place model.")
             
-        # 単勝モデルに単勝戦略パラメータを保存
+        # 単勝モデルに単勝・馬連戦略パラメータを保存
         if best_params_win_strat and win_model is not None:
             win_model_data['optimal_params'] = {
                 'alpha': best_params_win_strat['alpha'],
@@ -298,9 +557,14 @@ def run_backtest():
                 'ev_threshold': float(best_params_win_strat['ev_threshold']),
                 'strategy': 'win_ev'
             }
+            if best_params_umaren:
+                win_model_data['optimal_params_umaren'] = {
+                    'pop_limit': 99 if best_params_umaren['pop_limit'] == "NoLimit" else int(best_params_umaren['pop_limit']),
+                    'ev_threshold': float(best_params_umaren['ev_threshold'])
+                }
             with open(WIN_MODEL_PATH, 'wb') as f:
                 pickle.dump(win_model_data, f)
-            logger.info("Saved optimal win strategy parameters to Win model.")
+            logger.info("Saved optimal win & umaren strategy parameters to Win model.")
             
     except Exception as e:
         logger.error(f"Error saving optimal params: {e}")
