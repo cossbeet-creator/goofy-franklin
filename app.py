@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from scraper import get_full_race_data
 from predictor import calculate_base_win_rates, calculate_expected_values, MODEL_PATH, PLACE_MODEL_PATH
 from gemini_analyzer import analyze_race_with_gemini
-from train import train_model
 
 # 環境変数のロード
 load_dotenv()
@@ -227,20 +226,7 @@ with col_sidebar2:
         st.warning("🔴 未学習")
 
 if not (is_win_loaded and is_place_loaded):
-    st.sidebar.info("回収率100%超えに向けて、下のボタンから実データでのダブルモデル学習（単勝・複勝）を実行してください。")
-
-# 2. モデル学習実行ボタン
-if st.sidebar.button("🔄 AIモデルを再学習する", type="secondary", use_container_width=True):
-    with st.sidebar.status("🤖 モデル（単勝・複勝）を再学習中...", expanded=True) as status:
-        status.update(label="📊 過去CSVデータをロード＆特徴量生成中 (約30万行)...")
-        try:
-            auc_win, auc_place = train_model()
-            status.update(label=f"🎉 学習完了! (単勝AUC: {auc_win:.3f} | 複勝AUC: {auc_place:.3f})", state="complete")
-            st.sidebar.success("AIモデルの学習が完了しました！")
-            st.rerun()
-        except Exception as e:
-            status.update(label=f"❌ 学習失敗: {e}", state="error")
-            st.sidebar.error(f"学習中にエラーが発生しました: {e}")
+    st.sidebar.error("⚠️ AIモデルファイル（.pkl）が見つかりません。リポジトリに正しく含まれているか確認してください。")
 
 st.sidebar.markdown("---")
 
